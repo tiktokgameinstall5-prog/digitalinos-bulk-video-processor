@@ -430,15 +430,30 @@ def reverify(*, timeout: float = 10.0) -> LicenseState:
 
 
 def release(*, timeout: float = 10.0) -> None:
-    """Release the current device from the licence locally.
+    """Release THIS device from the licence — both server-side and locally.
 
-    The server-side `/api/license/release` endpoint requires a logged-in web
-    session, so it cannot be called from the desktop. To free a seat against
-    the device-limit, users should release the device from their dashboard at
-    https://digitalinos-web.vercel.app/dashboard. Locally we just clear the
-    cached licence so this machine forgets the key.
+    Calls the unauthenticated ``/api/license/release-device`` endpoint with
+    the cached key + this machine's hardware fingerprint, which deletes the
+    matching ``Device`` row on the server (freeing a seat against
+    ``maxDevices``). Then wipes the local cache so this machine forgets the
+    key. Network errors do NOT block the local clear — the user can always
+    release the device manually from the web dashboard if needed.
     """
-    _ = timeout  # kept for API-compat; no network call from the desktop side.
+    state = load_state()
+    if state.license_key and requests is not None:
+        try:
+            requests.post(
+                f"{_api_base()}/api/license/release-device",
+                json={
+                    "key": state.license_key,
+                    "hardware_id": state.device_id or device_fingerprint(),
+                },
+                timeout=timeout,
+            )
+        except requests.RequestException:
+            # Best effort. The local clear below still runs so the user
+            # isn't stuck with a stale key on this PC.
+            pass
     _clear()
 
 

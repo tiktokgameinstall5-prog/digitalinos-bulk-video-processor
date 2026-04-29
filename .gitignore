@@ -34,3 +34,4 @@ htmlcov/
 # App runtime
 *.log
 output/
+.venv-test/

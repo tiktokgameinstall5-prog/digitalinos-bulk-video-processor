@@ -207,3 +207,68 @@ def test_device_fingerprint_is_stable_within_a_run() -> None:
     b = lc.device_fingerprint()
     assert a == b
     assert len(a) == 32  # 32 hex chars
+
+
+def test_release_calls_server_then_clears_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    """release() must POST to /api/license/release-device with the cached
+    key + this device's hardware id, then wipe the local cache."""
+    s = lc.LicenseState(
+        license_key="DGIT-AAAA-BBBB-CCCC-DDDD",
+        plan="PRO",
+        expires_at=time.time() + 86400,
+        last_verified_at=time.time(),
+        jwt="cached-jwt",
+        device_id="dev-fp-1",
+    )
+    lc.save_state(s)
+
+    captured: dict[str, Any] = {}
+
+    class _Resp:
+        ok = True
+        status_code = 200
+        content = b'{"ok":true,"released":true}'
+        def json(self) -> dict[str, Any]:
+            return {"ok": True, "released": True}
+
+    def fake_post(url: str, json: dict[str, Any] | None = None, timeout: float | None = None) -> _Resp:
+        captured["url"] = url
+        captured["json"] = json
+        return _Resp()
+
+    monkeypatch.setattr(lc.requests, "post", fake_post)
+
+    lc.release()
+
+    assert captured["url"].endswith("/api/license/release-device"), captured
+    assert captured["json"] == {
+        "key": "DGIT-AAAA-BBBB-CCCC-DDDD",
+        "hardware_id": "dev-fp-1",
+    }
+    cleared = lc.load_state()
+    assert cleared.license_key == ""
+    assert cleared.plan == ""
+    assert cleared.jwt == ""
+
+
+def test_release_offline_still_clears_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If the server is unreachable, release() still wipes the local cache so
+    the user isn't stuck with a stale key on this PC."""
+    s = lc.LicenseState(
+        license_key="DGIT-AAAA-BBBB-CCCC-DDDD",
+        plan="STUDIO",
+        expires_at=time.time() + 86400,
+        last_verified_at=time.time(),
+        device_id="dev-fp-2",
+    )
+    lc.save_state(s)
+
+    def fake_post(*_a: Any, **_k: Any) -> Any:
+        raise lc.requests.RequestException("network down")
+
+    monkeypatch.setattr(lc.requests, "post", fake_post)
+
+    lc.release()  # must not raise
+
+    cleared = lc.load_state()
+    assert cleared.license_key == ""
