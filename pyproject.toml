@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "video-batch-pro"
+version = "0.1.0"
+description = "Offline batch video processing with watermarks, AI upscaling, and ZIP export."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "PyQt5>=5.15,<6",
+]
+
+[project.scripts]
+video-batch-pro = "app.main:main"
+
+[tool.setuptools]
+packages = ["app", "app.ui", "app.processing", "app.utils"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra"
+testpaths = ["tests"]
