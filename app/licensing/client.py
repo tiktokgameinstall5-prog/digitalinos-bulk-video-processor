@@ -314,11 +314,28 @@ def increment_trial() -> LicenseState:
 # Activation / verify / release.
 # ---------------------------------------------------------------------------
 
-def activate(license_key: str, *, timeout: float = 15.0) -> LicenseState:
-    """Redeem (or re-activate) a license key for THIS device.
+def _verify_payload(state: "LicenseState", key: str) -> dict:
+    """Build the body expected by `/api/license/verify`.
 
-    Calls `/api/license/redeem` then `/api/license/verify` to obtain a fresh
-    JWT, persists the result locally and returns the new state.
+    The web API's schema (see `src/app/api/license/verify/route.ts`) uses:
+      { key, hardware_id, hostname?, platform?, app_version? }
+    """
+    return {
+        "key": key,
+        "hardware_id": state.device_id or device_fingerprint(),
+        "hostname": platform.node() or socket.gethostname() or "Desktop",
+        "platform": platform.system().lower(),
+        "app_version": _app_version(),
+    }
+
+
+def activate(license_key: str, *, timeout: float = 15.0) -> LicenseState:
+    """Activate a license key on THIS device.
+
+    Calls `/api/license/verify` directly — the verify endpoint is the only
+    entry point the desktop app has access to (it's unauthenticated and
+    issues a signed JWT). `/api/license/redeem` is for logged-in web users
+    binding a key to their account and is not usable from the desktop.
     """
     if requests is None:
         raise LicenseError(
@@ -334,35 +351,37 @@ def activate(license_key: str, *, timeout: float = 15.0) -> LicenseState:
     if not state.device_id:
         state.device_id = device_fingerprint()
 
-    redeem_url = f"{_api_base()}/api/license/redeem"
     verify_url = f"{_api_base()}/api/license/verify"
-    payload = {
-        "license_key": key,
-        "device_id": state.device_id,
-        "device_label": _device_label(),
-    }
+    payload = _verify_payload(state, key)
 
     try:
-        r = requests.post(redeem_url, json=payload, timeout=timeout)
+        r = requests.post(verify_url, json=payload, timeout=timeout)
     except requests.RequestException as exc:
         raise LicenseError(f"Could not reach the licence server:\n{exc}") from exc
 
-    if r.status_code == 409:
-        raise LicenseError(
-            "This key is already used on the maximum number of devices for "
-            "its plan. Release a device from your dashboard at "
-            "https://digitalinos-web.vercel.app/dashboard and try again."
-        )
     if r.status_code == 404:
         raise LicenseError("That license key was not found. Check for typos.")
-    if r.status_code == 410:
-        raise LicenseError(
-            "This license has expired. Renew it from the dashboard at "
-            "https://digitalinos-web.vercel.app/pricing."
-        )
+    if r.status_code == 403:
+        try:
+            code = (r.json() or {}).get("code") or ""
+        except ValueError:
+            code = ""
+        if code == "REVOKED":
+            raise LicenseError("This license has been revoked.")
+        if code == "EXPIRED":
+            raise LicenseError(
+                "This license has expired. Renew it from the dashboard at "
+                "https://digitalinos-web.vercel.app/pricing."
+            )
+        if code == "DEVICE_LIMIT":
+            raise LicenseError(
+                "This key is already used on the maximum number of devices "
+                "for its plan. Release a device from your dashboard at "
+                "https://digitalinos-web.vercel.app/dashboard and try again."
+            )
     if not r.ok:
         try:
-            err = r.json().get("error") or r.text
+            err = (r.json() or {}).get("error") or r.text
         except ValueError:
             err = r.text
         raise LicenseError(f"Activation failed ({r.status_code}): {err}")
@@ -370,21 +389,7 @@ def activate(license_key: str, *, timeout: float = 15.0) -> LicenseState:
     body = r.json() if r.content else {}
     plan = str(body.get("plan", "") or "")
     expires_at = float(body.get("expires_at", 0) or 0)
-
-    # Verify to get a JWT + canonical state.
-    try:
-        v = requests.post(verify_url, json=payload, timeout=timeout)
-    except requests.RequestException as exc:
-        raise LicenseError(f"Could not verify the licence:\n{exc}") from exc
-
-    jwt = ""
-    if v.ok:
-        vbody = v.json() if v.content else {}
-        jwt = str(vbody.get("token", "") or "")
-        if not plan:
-            plan = str(vbody.get("plan", "") or "")
-        if not expires_at:
-            expires_at = float(vbody.get("expires_at", 0) or 0)
+    jwt = str(body.get("token", "") or "")
 
     state.license_key = key
     state.plan = plan or state.plan
@@ -404,7 +409,7 @@ def reverify(*, timeout: float = 10.0) -> LicenseState:
     try:
         r = requests.post(
             f"{_api_base()}/api/license/verify",
-            json={"license_key": state.license_key, "device_id": state.device_id},
+            json=_verify_payload(state, state.license_key),
             timeout=timeout,
         )
     except requests.RequestException:
@@ -425,19 +430,15 @@ def reverify(*, timeout: float = 10.0) -> LicenseState:
 
 
 def release(*, timeout: float = 10.0) -> None:
-    """Release the current device from the licence (frees a seat)."""
-    state = load_state()
-    if not state.license_key or requests is None:
-        _clear()
-        return
-    try:
-        requests.post(
-            f"{_api_base()}/api/license/release",
-            json={"license_key": state.license_key, "device_id": state.device_id},
-            timeout=timeout,
-        )
-    except requests.RequestException:
-        pass
+    """Release the current device from the licence locally.
+
+    The server-side `/api/license/release` endpoint requires a logged-in web
+    session, so it cannot be called from the desktop. To free a seat against
+    the device-limit, users should release the device from their dashboard at
+    https://digitalinos-web.vercel.app/dashboard. Locally we just clear the
+    cached licence so this machine forgets the key.
+    """
+    _ = timeout  # kept for API-compat; no network call from the desktop side.
     _clear()
 
 
