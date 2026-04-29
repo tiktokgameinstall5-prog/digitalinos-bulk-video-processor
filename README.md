@@ -12,7 +12,8 @@ A fully-offline, open-source desktop batch video processor — like a simplified
 - **Presets** — save / load your favourite settings as JSON.
 - **In-app Help tab** with full step-by-step usage tips.
 - **1-click launcher** on Windows (`launch.bat`) — no terminal required.
-- **Offline-only**: no network calls, no telemetry.
+- **Offline-friendly licensing**: 10-video free trial keyed to your hardware (uninstall + reinstall does *not* reset it). Once activated, the app runs offline for up to 30 days between online verifications.
+- **Single-file `.exe`** option with PyArmor-obfuscated bytecode — see [Building a release `.exe`](#building-a-release-exe) below.
 
 Primary target: **Windows**. Also runs on macOS and Linux.
 
@@ -168,6 +169,34 @@ video_batch_pro/
 ├── requirements.txt
 └── README.md
 ```
+
+---
+
+## Building a release `.exe`
+
+The recommended way to ship Digitalinos to end-users is a single, source-protected `.exe` produced by **Nuitka** in onefile mode. Nuitka compiles the Python sources to C and then to a native Windows binary, so a user who unzips the executable does **not** find any `.py` or `.pyc` files at all — only compiled machine code. This is much stronger source protection than any pure-Python obfuscator (PyArmor, etc.) and has no per-file size limits or licence fees.
+
+### Option 1 — let GitHub Actions build it for you (recommended)
+
+The repo ships a workflow at `.github/workflows/build-windows.yml` that runs on `windows-latest`, compiles with Nuitka, and packages `dist/Digitalinos.exe` as a build artefact. It runs on every push to `main` / `devin/*` branches and on every PR. Tags matching `v*` additionally publish the `.exe` as a GitHub Release asset.
+
+1. Push to a branch (or open a PR).
+2. Open the **Actions** tab on GitHub → pick the latest `build-windows` run → download `Digitalinos-windows-x64`.
+3. To cut a public release: `git tag v0.3.0 && git push --tags`. The `.exe` is attached to the new GitHub Release automatically.
+
+### Option 2 — build locally on Windows
+
+```cmd
+build.bat
+```
+
+This creates `.venv-build`, installs Nuitka (from `requirements-build.txt`), then compiles `run.py` + the `app/` package into a single onefile executable. First-time builds take 5–15 minutes (Nuitka downloads MinGW64 if no C compiler is detected, then compiles a few hundred Python modules). Subsequent builds are ~2 minutes thanks to Nuitka's compilation cache. Output: `dist\Digitalinos.exe`.
+
+> **Why not on Linux/macOS?** Nuitka produces native binaries for the host OS — a Windows `.exe` *must* be built on a Windows machine (or in CI). The repo's GitHub Actions workflow exists precisely so you don't need a Windows box yourself.
+
+### Source-protection caveats
+
+Nuitka compilation defeats every off-the-shelf Python decompiler — there is no `.py` or `.pyc` to recover, only stripped native machine code. A determined reverse-engineer with IDA Pro or Ghidra can still analyse the binary, but doing so is orders of magnitude harder than reading recovered Python. The licence/auth model stays defence-in-depth: the `.exe` only holds a public key + a cached short-lived JWT, never the RSA private key. Trial counters are server-tracked by hardware fingerprint so a wiped local cache cannot reset the trial.
 
 ---
 

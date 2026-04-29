@@ -157,10 +157,19 @@ class MainWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(50, self._silent_reverify)
 
     def _silent_reverify(self) -> None:
-        """Best-effort: refresh JWT in background. Failures are silent."""
+        """Best-effort: refresh JWT and sync trial counter from the server.
+
+        Both calls swallow all errors so a flaky network never crashes the app
+        or surfaces an alarming pop-up. When offline the cached state stays
+        valid for the full grace period.
+        """
         try:
             license_client.reverify(timeout=5.0)
         except Exception:  # noqa: BLE001 - never crash on license refresh
+            pass
+        try:
+            license_client.boot_sync_trial()
+        except Exception:  # noqa: BLE001 - never crash on trial sync
             pass
         self._refresh_license_pill()
 

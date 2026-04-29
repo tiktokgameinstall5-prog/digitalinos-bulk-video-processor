@@ -11,8 +11,14 @@ dist/
 
 # Virtual envs
 .venv/
+.venv-build/
 venv/
 env/
+
+# PyInstaller / PyArmor build artefacts
+*.spec.bak
+pyarmor.log
+.pyarmor/
 
 # IDE
 .vscode/
