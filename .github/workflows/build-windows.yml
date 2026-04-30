@@ -1,0 +1,87 @@
+name: build-windows
+
+on:
+  push:
+    branches: [main, "devin/**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Digitalinos.exe (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.txt
+
+      - name: Cache Nuitka build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/AppData/Local/Nuitka/Nuitka/Cache
+            ${{ github.workspace }}/run.dist
+          key: nuitka-${{ runner.os }}-py311-${{ hashFiles('requirements.txt', 'requirements-build.txt') }}
+          restore-keys: |
+            nuitka-${{ runner.os }}-py311-
+
+      - name: Compile to native .exe with Nuitka
+        shell: cmd
+        run: |
+          if not exist dist mkdir dist
+          python -m nuitka ^
+            --onefile ^
+            --assume-yes-for-downloads ^
+            --windows-console-mode=disable ^
+            --enable-plugin=pyqt5 ^
+            --include-package=app ^
+            --include-package=app.licensing ^
+            --include-package=app.processing ^
+            --include-package=app.ui ^
+            --include-package=app.utils ^
+            --output-dir=dist ^
+            --output-filename=Digitalinos.exe ^
+            --company-name=Digitalinos ^
+            --product-name="Digitalinos Video Batch Pro" ^
+            --file-version=0.2.0.0 ^
+            --product-version=0.2.0.0 ^
+            run.py
+
+      - name: Verify exe exists
+        shell: cmd
+        run: |
+          if not exist dist\Digitalinos.exe (
+            echo dist\Digitalinos.exe is missing
+            exit /b 1
+          )
+          dir dist
+
+      - name: Upload Digitalinos.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: Digitalinos-windows-x64
+          path: dist/Digitalinos.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach exe to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Digitalinos.exe
+          generate_release_notes: true

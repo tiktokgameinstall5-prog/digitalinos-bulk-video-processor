@@ -1,0 +1,10 @@
+-r requirements.txt
+# Nuitka compiles Python -> C -> native binary, which is much stronger source
+# protection than any pure-Python obfuscator. PyArmor is rejected for this
+# project because its free tier refuses to obfuscate files over ~32KB
+# (main_window.py is bigger), and its paid tier is a recurring-fee dependency
+# we don't want to bake into the release pipeline. Nuitka has neither
+# limitation and ships free under Apache-2.0.
+nuitka>=2.4,<3
+ordered-set>=4.1
+zstandard>=0.22

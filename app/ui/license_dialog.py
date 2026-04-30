@@ -121,22 +121,38 @@ class LicenseDialog(QtWidgets.QDialog):
     # Behaviour
     # ------------------------------------------------------------------
     def _format_input(self, text: str) -> None:
-        """Auto-uppercase + auto-insert dashes after every 4 hex chars."""
+        """Auto-uppercase + auto-insert dashes every 4 chars.
+
+        A license key is ``DGIT-XXXX-XXXX-XXXX-XXXX`` → 20 alnum chars total
+        with 4 dashes. We do three things:
+
+        1. Upper-case and strip any non-alphanumerics.
+        2. If the user has typed something that clearly looks like a key
+           body but forgot the ``DGIT`` prefix (≥ 5 chars and doesn't
+           already start with ``DGIT``), prepend it for them. We
+           specifically do NOT prepend on very short inputs — otherwise
+           typing "D" → "G" → "I" → "T" one keystroke at a time would
+           keep re-prepending ``DGIT`` on every intermediate state.
+        3. Re-group into 4-char blocks separated by ``-``.
+
+        We always move the cursor to the end after reformatting. This is
+        slightly coarser than preserving the exact caret position, but
+        it avoids a nasty class of bugs where the cursor ends up in the
+        middle of an auto-inserted group and the next keystroke gets
+        typed *inside* a block, which then breaks the formatter on the
+        following re-run.
+        """
         cleaned = "".join(c for c in text.upper() if c.isalnum())
-        # Re-prefix the hard "DGIT-" if user typed anything else first.
-        if cleaned and not cleaned.startswith("DGIT"):
+        if cleaned and not cleaned.startswith("DGIT") and len(cleaned) >= 5:
             cleaned = "DGIT" + cleaned
-        groups = [cleaned[:4]]
-        rest = cleaned[4:]
-        while rest:
-            groups.append(rest[:4])
-            rest = rest[4:]
+        # Cap at 20 alnum chars (DGIT + 16 body).
+        cleaned = cleaned[:20]
+        groups = [cleaned[i : i + 4] for i in range(0, len(cleaned), 4)]
         formatted = "-".join(groups)
         if formatted != text:
-            cursor = self.key_input.cursorPosition()
             self.key_input.blockSignals(True)
             self.key_input.setText(formatted)
-            self.key_input.setCursorPosition(min(len(formatted), cursor + 1))
+            self.key_input.setCursorPosition(len(formatted))
             self.key_input.blockSignals(False)
 
     def _refresh(self) -> None:
