@@ -356,6 +356,7 @@ def build_overlay_filtergraph(
 class EncodeOptions:
     watermark: WatermarkSettings
     target_height: Optional[int] = None   # e.g. 2160 for 4K; None = keep
+    target_width: Optional[int] = None    # e.g. 1080 for Portrait HD; None = derive
     video_codec: str = "libx264"
     crf: int = 20
     preset: str = "medium"
@@ -373,6 +374,10 @@ class EncodeOptions:
     scale_flags: str = "lanczos+accurate_rnd+full_chroma_int"
     profile_high: bool = True             # H.264 High profile (better quality
                                           # at the same bitrate)
+    # When set, the scale stage uses ``crop`` to centre-fit the frame to the
+    # target aspect ratio before resizing — required for Portrait HD on
+    # landscape input so we don't end up with letterboxes.
+    crop_to_aspect: bool = False
 
 
 ProgressCallback = Callable[[float], None]
@@ -404,10 +409,11 @@ def _chain_post_filters(
       3. unsharp (sharpens AFTER upscale to compensate for any softening)
       4. eq      (final contrast/saturation pop)
     """
+    target_w = options.target_width or 0
+    target_h = options.target_height or 0
     do_scale = (
-        options.target_height
-        and options.target_height > 0
-        and options.target_height != info.height
+        (target_w and target_w > 0 and target_w != info.width)
+        or (target_h and target_h > 0 and target_h != info.height)
     )
     do_sharpen = options.sharpen and options.sharpen_amount > 0
     do_denoise = options.denoise
@@ -427,9 +433,26 @@ def _chain_post_filters(
         )
         stages.append(f"hqdn3d={ls:.2f}:{cs:.2f}:{lt:.2f}:{ct:.2f}")
     if do_scale:
-        stages.append(
-            f"scale=-2:{int(options.target_height)}:flags={options.scale_flags}"
-        )
+        if options.crop_to_aspect and target_w and target_h:
+            # Centre-crop to the target aspect ratio first, then scale.
+            # This is what makes Portrait HD work on landscape input
+            # without pillarboxing.
+            stages.append(
+                f"crop='min(iw,ih*{target_w}/{target_h})':"
+                f"'min(ih,iw*{target_h}/{target_w})'"
+            )
+        if target_w and target_h:
+            stages.append(
+                f"scale={int(target_w)}:{int(target_h)}:flags={options.scale_flags}"
+            )
+        elif target_h:
+            stages.append(
+                f"scale=-2:{int(target_h)}:flags={options.scale_flags}"
+            )
+        else:
+            stages.append(
+                f"scale={int(target_w)}:-2:flags={options.scale_flags}"
+            )
     if do_sharpen:
         # unsharp: luma_msize_x:luma_msize_y:luma_amount:chroma_msize_x:chroma_msize_y:chroma_amount
         # Boost chroma sharpening at higher amounts for that crisp CapCut look.
@@ -655,6 +678,7 @@ def apply_quality_template(options: EncodeOptions, template_name: str) -> Encode
     return EncodeOptions(
         watermark=options.watermark,
         target_height=tpl.target_height if tpl.target_height is not None else options.target_height,
+        target_width=options.target_width,
         video_codec=options.video_codec,
         crf=tpl.crf,
         preset=tpl.preset,
@@ -668,4 +692,29 @@ def apply_quality_template(options: EncodeOptions, template_name: str) -> Encode
         color_boost=tpl.color_boost,
         scale_flags=options.scale_flags,
         profile_high=options.profile_high,
+        crop_to_aspect=options.crop_to_aspect,
     )
+
+
+# ---------------------------------------------------------------------------
+# Resolution presets — labelled targets exposed in the UI.
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ResolutionPreset:
+    label: str
+    width: int
+    height: int
+    portrait: bool = False  # True = centre-crop landscape input to 9:16
+
+
+RESOLUTION_PRESETS: dict[str, ResolutionPreset] = {
+    "HD (1280×720)":          ResolutionPreset("HD",          1280,  720),
+    "Ultra HD (1920×1080)":   ResolutionPreset("Ultra HD",    1920, 1080),
+    "Portrait HD (1080×1920)":ResolutionPreset("Portrait HD", 1080, 1920, portrait=True),
+    "2K (2560×1440)":         ResolutionPreset("2K",          2560, 1440),
+    "4K (3840×2160)":         ResolutionPreset("4K",          3840, 2160),
+}
+
+
+DEFAULT_RESOLUTION_KEY = "Ultra HD (1920×1080)"
