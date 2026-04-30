@@ -35,3 +35,4 @@ htmlcov/
 *.log
 output/
 .venv-test/
+.venv-run/

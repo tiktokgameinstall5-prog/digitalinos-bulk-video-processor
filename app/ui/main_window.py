@@ -8,10 +8,18 @@ from typing import Optional
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+from ..processing.captions_handler import (
+    CaptionOptions,
+    CaptionStyle,
+    DEFAULT_STYLE_PRESETS,
+    WHISPER_SIZES,
+)
 from ..processing.ffmpeg_handler import (
+    DEFAULT_RESOLUTION_KEY,
     EncodeOptions,
     FFmpegError,
     QUALITY_TEMPLATES,
+    RESOLUTION_PRESETS,
     VideoInfo,
     WatermarkSettings,
     apply_quality_template,
@@ -21,6 +29,7 @@ from ..processing.ffmpeg_handler import (
 )
 from ..processing.queue_manager import BatchJob, BatchWorker, QueueItem
 from ..processing.upscale_handler import (
+    UPSCALE_MODES,
     UpscaleOptions,
     realesrgan_available,
 )
@@ -327,6 +336,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tabs = QtWidgets.QTabWidget()
         tabs.addTab(self._build_watermark_tab(), "Watermark")
         tabs.addTab(self._build_upscale_tab(), "Upscale")
+        tabs.addTab(self._build_captions_tab(), "Captions")
         tabs.addTab(self._build_output_tab(), "Output")
         tabs.addTab(self._build_preset_tab(), "Presets")
         tabs.addTab(self._build_help_tab(), "Help")
@@ -495,28 +505,68 @@ class MainWindow(QtWidgets.QMainWindow):
         self.up_enable = QtWidgets.QCheckBox("Enable upscaling")
         l.addWidget(self.up_enable)
 
+        # Mode (Fast / Balanced / AI)
+        mode_row = QtWidgets.QHBoxLayout()
+        mode_row.addWidget(QtWidgets.QLabel("Mode:"))
+        self.up_mode = QtWidgets.QComboBox()
+        self.up_mode.addItems([
+            "Fast (FFmpeg Lanczos — instant)",
+            "Balanced (Lanczos + denoise + sharpen)",
+            "AI (Real-ESRGAN — best, slow)",
+        ])
+        self.up_mode.setCurrentIndex(1)
+        self.up_mode.setToolTip(
+            "Fast: instant rescale only. "
+            "Balanced: still no AI but cleans grain + sharpens, good default. "
+            "AI: frame-by-frame Real-ESRGAN super-resolution. First use "
+            "downloads the binary (~30 MB) into your AppData; subsequent "
+            "runs are fully offline."
+        )
+        mode_row.addWidget(self.up_mode, stretch=1)
+        l.addLayout(mode_row)
+
+        # Resolution preset
         tgt_row = QtWidgets.QHBoxLayout()
         tgt_row.addWidget(QtWidgets.QLabel("Target resolution:"))
         self.up_target = QtWidgets.QComboBox()
-        self.up_target.addItems(["1080p (1920×1080)", "1440p (2560×1440)", "4K (3840×2160)"])
-        self.up_target.setCurrentIndex(2)
-        tgt_row.addWidget(self.up_target)
-        tgt_row.addStretch(1)
+        for label in RESOLUTION_PRESETS.keys():
+            self.up_target.addItem(label)
+        self.up_target.setCurrentText(DEFAULT_RESOLUTION_KEY)
+        self.up_target.setToolTip(
+            "HD = 1280×720, Ultra HD = 1920×1080, Portrait HD = 1080×1920 "
+            "(centre-cropped to 9:16 for landscape input), 2K = 2560×1440, "
+            "4K = 3840×2160."
+        )
+        tgt_row.addWidget(self.up_target, stretch=1)
         l.addLayout(tgt_row)
 
-        backend_row = QtWidgets.QHBoxLayout()
-        backend_row.addWidget(QtWidgets.QLabel("Backend:"))
-        self.up_backend = QtWidgets.QComboBox()
-        self.up_backend.addItems(["auto", "ffmpeg", "realesrgan"])
-        backend_row.addWidget(self.up_backend)
-        backend_row.addStretch(1)
-        l.addLayout(backend_row)
+        # AI sub-options (only meaningful in AI mode but always visible).
+        ai_row = QtWidgets.QHBoxLayout()
+        ai_row.addWidget(QtWidgets.QLabel("AI scale:"))
+        self.up_scale = QtWidgets.QComboBox()
+        self.up_scale.addItems(["2x", "3x", "4x"])
+        self.up_scale.setCurrentIndex(0)
+        ai_row.addWidget(self.up_scale)
+        ai_row.addWidget(QtWidgets.QLabel("Tile:"))
+        self.up_tile = QtWidgets.QSpinBox()
+        self.up_tile.setRange(0, 1024)
+        self.up_tile.setSingleStep(32)
+        self.up_tile.setValue(0)
+        self.up_tile.setSpecialValueText("auto")
+        self.up_tile.setToolTip(
+            "Real-ESRGAN tile size. 0 = auto (recommended). Lower if the AI "
+            "stage runs out of GPU memory."
+        )
+        ai_row.addWidget(self.up_tile)
+        ai_row.addStretch(1)
+        l.addLayout(ai_row)
 
         info_text = QtWidgets.QLabel(
-            "<b>Real-ESRGAN</b> does frame-by-frame AI upscale (best quality, slow). "
-            "<b>FFmpeg Lanczos</b> is instant and still gives CapCut-style clean "
-            "output when combined with the quality template sharpening in the "
-            "<i>Output</i> tab."
+            "<b>Fast</b> just rescales — no detail recovery. "
+            "<b>Balanced</b> adds a denoise + unsharp pass, no AI. "
+            "<b>AI</b> calls Real-ESRGAN frame-by-frame for true detail "
+            "synthesis. If the AI binary cannot be downloaded the pipeline "
+            "auto-falls-back to Fast and logs the failure."
         )
         info_text.setObjectName("muted")
         info_text.setWordWrap(True)
@@ -524,6 +574,122 @@ class MainWindow(QtWidgets.QMainWindow):
 
         l.addStretch(1)
         return w
+
+    def _build_captions_tab(self) -> QtWidgets.QWidget:
+        w = QtWidgets.QWidget()
+        l = QtWidgets.QVBoxLayout(w)
+        l.setContentsMargins(4, 4, 4, 4)
+        l.setSpacing(8)
+
+        self.cap_enable = QtWidgets.QCheckBox("Enable auto captions (Whisper)")
+        l.addWidget(self.cap_enable)
+
+        # Whisper model size + language
+        model_row = QtWidgets.QHBoxLayout()
+        model_row.addWidget(QtWidgets.QLabel("Whisper model:"))
+        self.cap_model = QtWidgets.QComboBox()
+        self.cap_model.addItems(list(WHISPER_SIZES))
+        self.cap_model.setCurrentText("tiny")
+        self.cap_model.setToolTip(
+            "tiny = fast but rough (~74 MB). base = balanced (~145 MB). "
+            "small = best accuracy on CPU but slow (~466 MB). The model "
+            "downloads to your AppData on first use of that size."
+        )
+        model_row.addWidget(self.cap_model)
+        model_row.addWidget(QtWidgets.QLabel("Language:"))
+        self.cap_language = QtWidgets.QLineEdit()
+        self.cap_language.setPlaceholderText("auto")
+        self.cap_language.setMaximumWidth(100)
+        self.cap_language.setToolTip(
+            "ISO code (en, es, fr, de, …). Leave blank to auto-detect."
+        )
+        model_row.addWidget(self.cap_language)
+        model_row.addStretch(1)
+        l.addLayout(model_row)
+
+        # Style mode (default preset vs custom)
+        style_row = QtWidgets.QHBoxLayout()
+        style_row.addWidget(QtWidgets.QLabel("Style:"))
+        self.cap_style_mode = QtWidgets.QComboBox()
+        self.cap_style_mode.addItems(["default", "custom"])
+        style_row.addWidget(self.cap_style_mode)
+        self.cap_style_preset = QtWidgets.QComboBox()
+        self.cap_style_preset.addItems(list(DEFAULT_STYLE_PRESETS.keys()))
+        style_row.addWidget(self.cap_style_preset, stretch=1)
+        l.addLayout(style_row)
+
+        # Custom-mode controls
+        custom_box = QtWidgets.QGroupBox("Custom style")
+        cf = QtWidgets.QGridLayout(custom_box)
+
+        cf.addWidget(QtWidgets.QLabel("Font:"), 0, 0)
+        self.cap_font = QtWidgets.QFontComboBox()
+        self.cap_font.setCurrentFont(QtGui.QFont("DejaVu Sans"))
+        cf.addWidget(self.cap_font, 0, 1, 1, 3)
+
+        cf.addWidget(QtWidgets.QLabel("Size:"), 1, 0)
+        self.cap_size = QtWidgets.QSpinBox()
+        self.cap_size.setRange(10, 96)
+        self.cap_size.setValue(28)
+        cf.addWidget(self.cap_size, 1, 1)
+
+        cf.addWidget(QtWidgets.QLabel("Stroke:"), 1, 2)
+        self.cap_stroke = QtWidgets.QSpinBox()
+        self.cap_stroke.setRange(0, 8)
+        self.cap_stroke.setValue(2)
+        cf.addWidget(self.cap_stroke, 1, 3)
+
+        cf.addWidget(QtWidgets.QLabel("Text colour:"), 2, 0)
+        self.cap_color = QtWidgets.QPushButton("#FFFFFF")
+        self.cap_color.clicked.connect(
+            lambda: self._pick_caption_color(self.cap_color)
+        )
+        cf.addWidget(self.cap_color, 2, 1)
+
+        cf.addWidget(QtWidgets.QLabel("Outline colour:"), 2, 2)
+        self.cap_outline = QtWidgets.QPushButton("#000000")
+        self.cap_outline.clicked.connect(
+            lambda: self._pick_caption_color(self.cap_outline)
+        )
+        cf.addWidget(self.cap_outline, 2, 3)
+
+        self.cap_bold = QtWidgets.QCheckBox("Bold")
+        cf.addWidget(self.cap_bold, 3, 0, 1, 2)
+
+        l.addWidget(custom_box)
+
+        info = QtWidgets.QLabel(
+            "Captions are transcribed with Whisper, written as a sidecar "
+            "<code>.srt</code>, then burned into the video via FFmpeg's "
+            "<code>subtitles=</code> filter (libass)."
+        )
+        info.setObjectName("muted")
+        info.setWordWrap(True)
+        l.addWidget(info)
+
+        # Toggle visibility of preset / custom controls
+        def _refresh_visibility() -> None:
+            is_custom = self.cap_style_mode.currentText() == "custom"
+            self.cap_style_preset.setVisible(not is_custom)
+            custom_box.setVisible(is_custom)
+
+        self.cap_style_mode.currentTextChanged.connect(lambda _: _refresh_visibility())
+        _refresh_visibility()
+
+        l.addStretch(1)
+        return w
+
+    def _pick_caption_color(self, btn: QtWidgets.QPushButton) -> None:
+        current = QtGui.QColor(btn.text())
+        new_color = QtWidgets.QColorDialog.getColor(
+            current, self, "Choose caption colour"
+        )
+        if new_color.isValid():
+            btn.setText(new_color.name().upper())
+            btn.setStyleSheet(
+                f"background:{new_color.name()};color:"
+                f"{'#000' if new_color.lightness() > 128 else '#FFF'};"
+            )
 
     def _build_output_tab(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
@@ -858,9 +1024,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sharpen_amount.setValue(float(tpl.sharpen_amount))
         if tpl.target_height is not None:
             self.up_enable.setChecked(True)
-            heights = [1080, 1440, 2160]
-            if tpl.target_height in heights:
-                self.up_target.setCurrentIndex(heights.index(tpl.target_height))
+            for label, preset in RESOLUTION_PRESETS.items():
+                if preset.height == tpl.target_height and not preset.portrait:
+                    self.up_target.setCurrentText(label)
+                    break
 
     # ------------------------------------------------------------------
     # Presets
@@ -890,12 +1057,36 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _collect_upscale(self) -> UpscaleOptions:
-        heights = [1080, 1440, 2160]
-        target = heights[self.up_target.currentIndex()]
+        preset = RESOLUTION_PRESETS.get(
+            self.up_target.currentText(), RESOLUTION_PRESETS[DEFAULT_RESOLUTION_KEY]
+        )
+        mode = UPSCALE_MODES[self.up_mode.currentIndex()]
+        scale_index = self.up_scale.currentIndex()  # 0,1,2 -> 2x,3x,4x
         return UpscaleOptions(
             enabled=self.up_enable.isChecked(),
-            target_height=target,
-            backend=self.up_backend.currentText(),
+            target_height=preset.height,
+            target_width=preset.width,
+            mode=mode,
+            scale=scale_index + 2,
+            tile_size=int(self.up_tile.value()),
+        )
+
+    def _collect_captions(self) -> CaptionOptions:
+        style = CaptionStyle(
+            mode=self.cap_style_mode.currentText(),
+            preset=self.cap_style_preset.currentText(),
+            font_name=self.cap_font.currentFont().family(),
+            font_size=int(self.cap_size.value()),
+            primary_color=self.cap_color.text(),
+            outline_color=self.cap_outline.text(),
+            outline_width=int(self.cap_stroke.value()),
+            bold=self.cap_bold.isChecked(),
+        )
+        return CaptionOptions(
+            enabled=self.cap_enable.isChecked(),
+            model_size=self.cap_model.currentText(),
+            language=self.cap_language.text().strip(),
+            style=style,
         )
 
     def _apply_watermark(self, wm: WatermarkSettings) -> None:
@@ -928,13 +1119,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_upscale(self, up: UpscaleOptions) -> None:
         self.up_enable.setChecked(up.enabled)
-        heights = [1080, 1440, 2160]
+        # Match by (width, height) to handle Portrait HD vs landscape correctly.
+        for label, preset in RESOLUTION_PRESETS.items():
+            if preset.height == up.target_height and (
+                not up.target_width or preset.width == up.target_width
+            ):
+                self.up_target.setCurrentText(label)
+                break
+        else:
+            self.up_target.setCurrentText(DEFAULT_RESOLUTION_KEY)
+        mode = up.resolved_mode()
         try:
-            self.up_target.setCurrentIndex(heights.index(up.target_height))
+            self.up_mode.setCurrentIndex(UPSCALE_MODES.index(mode))
         except ValueError:
-            self.up_target.setCurrentIndex(2)
-        idx = self.up_backend.findText(up.backend)
-        self.up_backend.setCurrentIndex(idx if idx >= 0 else 0)
+            self.up_mode.setCurrentIndex(0)
+        scale_idx = max(0, min(2, int(up.scale) - 2))
+        self.up_scale.setCurrentIndex(scale_idx)
+        self.up_tile.setValue(int(up.tile_size or 0))
 
     def _save_preset(self) -> None:
         name = self.preset_name.text().strip()
@@ -1039,6 +1240,7 @@ class MainWindow(QtWidgets.QMainWindow):
         wm = self._collect_watermark()
         enc = self._build_encode_options(wm)
         up = self._collect_upscale()
+        cap = self._collect_captions()
 
         for widget in self._item_widgets:
             widget.set_status("pending")
@@ -1051,6 +1253,7 @@ class MainWindow(QtWidgets.QMainWindow):
             output_dir=self._output_dir,
             encode_options=enc,
             upscale_options=up,
+            caption_options=cap,
             sequential_naming=self.rename_sequential.isChecked(),
         )
 
